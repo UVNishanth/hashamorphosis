@@ -5,13 +5,13 @@ option java_package = "edu.sjsu.cs249.kafkaTable";
 package kafkaTable;
 
 service KafkaTable {
-    rpc inc(IncRequest) returns (IncResponse);
-    rpc get(GetRequest) returns (GetResponse);
+  rpc inc(IncRequest) returns (IncResponse);
+  rpc get(GetRequest) returns (GetResponse);
 }
 
 message ClientXid {
-    string clientid = 1;
-    int32 counter = 2;
+  string clientid = 1;
+  int32 counter = 2;
 }
 
 message IncRequest {
@@ -32,19 +32,40 @@ message GetRequest {
 
 message GetResponse {
   // if the key does not exist, the response will be zero
-  int32 value = 2;
+  int32 value = 1;
+}
+
+// these messages are published in the "snapshot" topic
+message Snapshot {
+  // id of the creator of the snapshot
+  string replicaId = 1;
+  // state table
+  map<string, int32> table = 2;
+  // operations offset the snapshot is relative to
+  int64 operationsOffset = 3;
+  // maps the client id to the last counter processed
+  // clients can have only one update going at a time
+  map<string, int32> clientCounters = 4;
+  // snapshotOrdering offset that triggered this snapshot
+  int64 snapshotOrderingOffset = 5;
 }
 
 service KafkaTableDebug {
-  rpc debug(ChainDebugRequest) returns (ChainDebugResponse);
+  rpc debug(KafkaTableDebugRequest) returns (KafkaTableDebugResponse);
+  rpc exit(ExitRequest) returns (ExitResponse);
 }
 
-message ChainDebugRequest {
+message ExitRequest {}
+message ExitResponse {}
+
+message KafkaTableDebugRequest {
 }
 
-message ChainDebugResponse {
+message KafkaTableDebugResponse {
+  Snapshot snapshot = 1;
 }
 
+// these messages are published in the "operations" topic
 message PublishedItem {
   oneof item {
     IncRequest inc = 1;
@@ -52,19 +73,11 @@ message PublishedItem {
   }
 }
 
+// these messages are published in the "snapshotOrdering" topic
 message SnapshotOrdering {
-    string replicaId = 1;
+  string replicaId = 1;
 }
 
-message KeyValue {
-    string key = 1;
-    int32 value = 2;
-}
-message Snapshot {
-    map<string, int32> values = 1;
-    int64 relativeOffset = 2;
-    string publishingReplicaId = 3;
-}
 message SimpleMessage {
   string message = 1;
 }
