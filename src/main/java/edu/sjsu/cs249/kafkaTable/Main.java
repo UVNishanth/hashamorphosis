@@ -196,20 +196,20 @@ public class Main {
 
             private void applyIncRequest(IncRequest incRequest) {
                 var clientXid = incRequest.getXid();
-                if (!isNewClientRequest(clientXid)) {
-                    System.out.println("Client IncRequest has old Xid. responding immediately...");
-                    return;
-                }
+//                if (!isNewClientRequest(clientXid)) {
+//                    System.out.println("Client IncRequest has old Xid. responding immediately...");
+//                    return;
+//                }
                 updateHashTable(incRequest.getKey(), incRequest.getIncValue());
                 updateClientXid(clientXid);
             }
 
             private void applyGetRequest(GetRequest getRequest) {
                 var clientXid = getRequest.getXid();
-                if (!isNewClientRequest(clientXid)) {
-                    System.out.println("Client GetRequest has old Xid. responding immediately...");
-                    return;
-                }
+//                if (!isNewClientRequest(clientXid)) {
+//                    System.out.println("Client GetRequest has old Xid. responding immediately...");
+//                    return;
+//                }
                 //updateHashTable(incRequest.getKey(), incRequest.getIncValue());
                 var key = getRequest.getKey();
                 if(!hashTable.containsKey(key)){
@@ -279,7 +279,7 @@ public class Main {
                 var clientId = clientXid.getClientid();
                 var counter = clientXid.getCounter();
                 //clientRequestXidMap.put(clientId, counter);
-                return !clientRequestXidMap.containsKey(clientId) || clientRequestXidMap.get(clientId) < counter;
+                return !clientRequestXidMap.containsKey(clientId) || clientRequestXidMap.get(clientId) > counter;
             }
 
             private void updateClientXid(ClientXid clientXid) {
