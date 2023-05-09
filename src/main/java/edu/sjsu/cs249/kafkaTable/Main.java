@@ -240,11 +240,17 @@ public class Main {
                             System.out.println("PublishedItem is proper");
                             IncRequest incRequest = message.getInc();
                             applyIncRequest(incRequest);
+                            if((record.offset() + 1) % snapshotPeriod == 0){
+                                System.out.println("Taking a snapshot. Smiiile");
+                            }
                             shouldRespond(message, true);
                         }
                         else{
                             GetRequest getRequest = message.getGet();
                             applyGetRequest(getRequest);
+                            if((record.offset() + 1) % snapshotPeriod == 0){
+                                System.out.println("Taking a snapshot. Smiiile");
+                            }
                             shouldRespond(message, false);
                         }
                     }
@@ -279,7 +285,7 @@ public class Main {
                 var clientId = clientXid.getClientid();
                 var counter = clientXid.getCounter();
                 //clientRequestXidMap.put(clientId, counter);
-                return !clientRequestXidMap.containsKey(clientId) || clientRequestXidMap.get(clientId) > counter;
+                return !clientRequestXidMap.containsKey(clientId) || clientRequestXidMap.get(clientId) < counter;
             }
 
             private void updateClientXid(ClientXid clientXid) {
@@ -316,7 +322,7 @@ public class Main {
             @Override
             public void get(GetRequest request,
                             StreamObserver<GetResponse> responseObserver) {
-
+                System.out.println("Received a get Request.");
                 ClientXid clientXid = request.getXid();
                 if (!isNewClientRequest(clientXid)) {
                     System.out.println("Client Request has old Xid. responding immediately...");
