@@ -103,10 +103,7 @@ public class Main {
 
         static Server server;
 
-        static String operationsTopicName = groupId + "operations";
-        static String snapshotTopicName = groupId + "snapshot";
-
-        static String snapshotOrderingTopicName = groupId + "snapshotOrdering";
+        static String operationsTopicName, snapshotTopicName, snapshotOrderingTopicName;
 
 
         @Override
@@ -160,13 +157,18 @@ public class Main {
 
 
             public KafkaTableService() {
+                operationsTopicName = groupId + "operations";
+                snapshotTopicName = groupId + "snapshot";
+                snapshotOrderingTopicName = groupId + "snapshotOrdering";
                 setupProducer();
                 setupConsumers();
-                try {
-                    consumeOperations();
-                } catch (InvalidProtocolBufferException e) {
-                    throw new RuntimeException(e);
-                }
+                new Thread(() -> {
+                    try {
+                        consumeOperations();
+                    } catch (InvalidProtocolBufferException e) {
+                        throw new RuntimeException(e);
+                    }
+                }).start();
 
 //                var records = snapshotConsumer.poll(Duration.ofSeconds(1));
 //                Snapshot latestSnapshot = null;
@@ -195,12 +197,27 @@ public class Main {
             private void applyIncRequest(IncRequest incRequest) {
                 var clientXid = incRequest.getXid();
                 if (!isNewClientRequest(clientXid)) {
-                    System.out.println("Client Request has old Xid. responding immediately...");
+                    System.out.println("Client IncRequest has old Xid. responding immediately...");
                     return;
                 }
                 updateHashTable(incRequest.getKey(), incRequest.getIncValue());
                 updateClientXid(clientXid);
             }
+
+            private void applyGetRequest(GetRequest getRequest) {
+                var clientXid = getRequest.getXid();
+                if (!isNewClientRequest(clientXid)) {
+                    System.out.println("Client GetRequest has old Xid. responding immediately...");
+                    return;
+                }
+                //updateHashTable(incRequest.getKey(), incRequest.getIncValue());
+                var key = getRequest.getKey();
+                if(!hashTable.containsKey(key)){
+                    hashTable.put(key, 0);
+                }
+                updateClientXid(clientXid);
+            }
+
 
             void publish(String topicName, byte[] msg) throws IOException {
                 //var properties = new Properties();
@@ -220,15 +237,14 @@ public class Main {
                         System.out.println(record.offset());
                         PublishedItem message = PublishedItem.parseFrom(record.value());
                         if(message.hasInc()){
+                            System.out.println("PublishedItem is proper");
                             IncRequest incRequest = message.getInc();
                             applyIncRequest(incRequest);
                             shouldRespond(message, true);
                         }
                         else{
                             GetRequest getRequest = message.getGet();
-                            if(isNewClientRequest(getRequest.getXid())){
-                                updateClientXid(getRequest.getXid());
-                            }
+                            applyGetRequest(getRequest);
                             shouldRespond(message, false);
                         }
                     }
@@ -263,7 +279,7 @@ public class Main {
                 var clientId = clientXid.getClientid();
                 var counter = clientXid.getCounter();
                 //clientRequestXidMap.put(clientId, counter);
-                return !clientRequestXidMap.containsKey(clientId) || clientRequestXidMap.get(clientId) > counter;
+                return !clientRequestXidMap.containsKey(clientId) || clientRequestXidMap.get(clientId) < counter;
             }
 
             private void updateClientXid(ClientXid clientXid) {
@@ -276,6 +292,7 @@ public class Main {
             @Override
             public void inc(IncRequest request,
                             StreamObserver<IncResponse> responseObserver) {
+                System.out.println("Received an inc Request.");
                 ClientXid clientXid = request.getXid();
                 if (!isNewClientRequest(clientXid)) {
                     System.out.println("Client Request has old Xid. responding immediately...");
@@ -286,7 +303,8 @@ public class Main {
                 ;
                 //servingClientXids.add(clientXid);
                 incResponseObserverMap.put(clientXid, responseObserver);
-                var incRequestInBytes = request.toByteArray();
+                PublishedItem incPublish = PublishedItem.newBuilder().setInc(request).build();
+                var incRequestInBytes = incPublish.toByteArray();
                 try {
                     publish(operationsTopicName, incRequestInBytes);
                 } catch (IOException e) {
@@ -310,7 +328,8 @@ public class Main {
                 ;
                 //servingClientXids.add(clientXid);
                 getResponseObserverMap.put(clientXid, responseObserver);
-                var getRequestInBytes = request.toByteArray();
+                PublishedItem getPublish = PublishedItem.newBuilder().setGet(request).build();
+                var getRequestInBytes = getPublish.toByteArray();
                 try {
                     publish(operationsTopicName, getRequestInBytes);
                 } catch (IOException e) {
@@ -347,18 +366,18 @@ public class Main {
     static class ClientCli implements Callable<Integer> {
 
         @Parameters(index = "0", description = "client id")
-        String clientId;
+        static String clientId;
 
-        @Parameters(index = "1", description = "comma separated list of servers to use.")
-        String serverPorts;
+//        @Parameters(index = "1", description = "comma separated list of servers to use.")
+//        static String serverPorts;
 
-        String[] servers = serverPorts.split(",");
+//        static String[] servers;
 
         @Command
         int get(@Parameters(paramLabel = "key") String key,
-                @Parameters(paramLabel = "clientId") String id,
                 @Parameters(paramLabel = "grpcHost:port") String server) {
-            var clientXid = ClientXid.newBuilder().setClientid(id).setCounter((int) (System.currentTimeMillis() / 1000)).build();
+            var clientXid = ClientXid.newBuilder().setClientid(clientId).setCounter((int) (System.currentTimeMillis() / 1000)).build();
+            System.out.println(clientXid);
             var stub = KafkaTableGrpc.newBlockingStub(ManagedChannelBuilder.forTarget(server).usePlaintext().build());
             var rsp = stub.get(GetRequest.newBuilder().setKey(key).setXid(clientXid).build());
             System.out.println(rsp.getValue());
@@ -366,13 +385,17 @@ public class Main {
         }
 
         @Command
-        int inc(@Parameters(paramLabel = "key") String key,
+        void inc(@Parameters(paramLabel = "key") String key,
                 @Parameters(paramLabel = "amount") int amount,
+                 @Parameters(paramLabel = "grpcHost:port") String[] servers,
                 @Option(names = "--repeat") boolean repeat,
                 @Option(names = "--concurrent") boolean concurrent) {
+            //servers = serverPorts.split(",");
             int count = repeat ? 2 : 1;
             var clientXid = ClientXid.newBuilder().setClientid(clientId).setCounter((int) (System.currentTimeMillis() / 1000)).build();
             System.out.println(clientXid);
+            System.out.println("server to connect to: "+ Arrays.toString(servers));
+            //var server = servers[0];
             for (int i = 0; i < count; i++) {
                 var s = Arrays.stream(servers);
                 if (concurrent) s = s.parallel();
@@ -385,14 +408,23 @@ public class Main {
                         return server + ": " + e.getMessage();
                     }
                 }).collect(Collectors.joining(", "));
+//                var stub = KafkaTableGrpc.newBlockingStub(ManagedChannelBuilder.forTarget(server).usePlaintext().build());
+//                //var result = "";
+//                try {
+//                    stub.inc(IncRequest.newBuilder().setKey(key).setIncValue(amount).setXid(clientXid).build());
+//                    System.out.println(server + ": success");
+//                } catch (Exception e) {
+//                    System.out.println(server + ": " + e.getMessage());
+//                }
                 System.out.println(result);
             }
-            return 0;
         }
 
 
         @Override
         public Integer call() throws Exception {
+            //servers = serverPorts.split(",");
+            //System.out.println("server to connect to: "+ Arrays.toString(servers));
             return 0;
         }
 
