@@ -1,4 +1,5 @@
-//TODO: Update: 05/07: have set up operations inc and get. but need to fix client as error is popping up and then test if inc and get run as expected
+//TODO: 1. work on snapshot ordering and creating snapshots when snapshot period is reached.
+//TODO: 2. reading snapshots on coming up. remember to always read the last snapshot in the snapshot topic
 
 // My IP: 172.27.24.15
 package edu.sjsu.cs249.kafkaTable;
@@ -14,6 +15,7 @@ import org.apache.kafka.clients.consumer.ConsumerConfig;
 import org.apache.kafka.clients.consumer.KafkaConsumer;
 import org.apache.kafka.clients.producer.KafkaProducer;
 import org.apache.kafka.clients.producer.ProducerRecord;
+import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.serialization.ByteArrayDeserializer;
 import org.apache.kafka.common.serialization.ByteArraySerializer;
 import org.apache.kafka.common.serialization.StringDeserializer;
@@ -127,13 +129,17 @@ public class Main {
 
             KafkaProducer<String, byte[]> producer;
             KafkaConsumer<String, byte[]> operationsConsumer;
+            //KafkaProducer<String, byte[]> snapshotProducer;
             KafkaConsumer<String, byte[]> snapshotConsumer;
+            //KafkaProducer<String, byte[]> snapshotOrderingProducer;
             KafkaConsumer<String, byte[]> snapshotOrderingConsumer;
 
             private void setupProducer() {
                 var properties = new Properties();
                 properties.put(AdminClientConfig.BOOTSTRAP_SERVERS_CONFIG, kafkaServer);
                 producer = new KafkaProducer<>(properties, new StringSerializer(), new ByteArraySerializer());
+                //snapshotProducer = new KafkaProducer<>(properties, new StringSerializer(), new ByteArraySerializer());
+                //snapshotOrderingProducer = new KafkaProducer<>(properties, new StringSerializer(), new ByteArraySerializer());
 
             }
 
@@ -146,12 +152,15 @@ public class Main {
 
                 operationsConsumer = new KafkaConsumer<>(properties, new StringDeserializer(), new ByteArrayDeserializer());
                 operationsConsumer.subscribe(List.of(operationsTopicName));
+                var dummyPoll = operationsConsumer.poll(Duration.ofSeconds(1));
 
                 snapshotConsumer = new KafkaConsumer<>(properties, new StringDeserializer(), new ByteArrayDeserializer());
                 snapshotConsumer.subscribe(List.of(snapshotTopicName));
+                dummyPoll = snapshotConsumer.poll(Duration.ofSeconds(1));
 
                 snapshotOrderingConsumer = new KafkaConsumer<>(properties, new StringDeserializer(), new ByteArrayDeserializer());
                 snapshotOrderingConsumer.subscribe(List.of(snapshotOrderingTopicName));
+                dummyPoll = snapshotOrderingConsumer.poll(Duration.ofSeconds(1));
 
             }
 
@@ -162,6 +171,7 @@ public class Main {
                 snapshotOrderingTopicName = groupId + "snapshotOrdering";
                 setupProducer();
                 setupConsumers();
+                addSelfToSnapshotOrdering();
                 new Thread(() -> {
                     try {
                         consumeOperations();
@@ -169,6 +179,14 @@ public class Main {
                         throw new RuntimeException(e);
                     }
                 }).start();
+
+//                new Thread(() -> {
+//                    try {
+//                        consumeSnapshotOrdering();
+//                    } catch (InvalidProtocolBufferException e) {
+//                        throw new RuntimeException(e);
+//                    }
+//                }).start();
 
 //                var records = snapshotConsumer.poll(Duration.ofSeconds(1));
 //                Snapshot latestSnapshot = null;
@@ -184,11 +202,22 @@ public class Main {
 
             }
 
+            private void addSelfToSnapshotOrdering() {
+                SnapshotOrdering orderingMsg = SnapshotOrdering.newBuilder().setReplicaId(replicaName).build();
+                try {
+                    publish(snapshotOrderingTopicName, orderingMsg.toByteArray());
+                } catch (IOException e) {
+                    throw new RuntimeException(e);
+                }
+                System.out.println("Added myself to snapshot ordering...");
+
+            }
+
             private void updateHashTable(String key, int incValue) {
-                if (!hashTable.containsKey(key)){
+                if (!hashTable.containsKey(key)) {
                     hashTable.put(key, 0);
                 }
-                if (hashTable.get(key) + incValue >= 0){
+                if (hashTable.get(key) + incValue >= 0) {
                     hashTable.put(key, hashTable.get(key) + incValue);
                 }
                 // TODO: Ask what happens when initial value for key is less than 0
@@ -212,7 +241,7 @@ public class Main {
 //                }
                 //updateHashTable(incRequest.getKey(), incRequest.getIncValue());
                 var key = getRequest.getKey();
-                if(!hashTable.containsKey(key)){
+                if (!hashTable.containsKey(key)) {
                     hashTable.put(key, 0);
                 }
                 updateClientXid(clientXid);
@@ -236,20 +265,23 @@ public class Main {
                         System.out.println(record.timestampType());
                         System.out.println(record.offset());
                         PublishedItem message = PublishedItem.parseFrom(record.value());
-                        if(message.hasInc()){
+                        if (message.hasInc()) {
                             System.out.println("PublishedItem is proper");
                             IncRequest incRequest = message.getInc();
                             applyIncRequest(incRequest);
-                            if((record.offset() + 1) % snapshotPeriod == 0){
-                                System.out.println("Taking a snapshot. Smiiile");
+                            if ((record.offset() + 1) % snapshotPeriod == 0) {
+                                System.out.println("Snapshot Period reached. Consuming ordering");
+                                takeSnapshot();
+                                //consumeSnapshotOrdering();
                             }
                             shouldRespond(message, true);
-                        }
-                        else{
+                        } else {
                             GetRequest getRequest = message.getGet();
                             applyGetRequest(getRequest);
-                            if((record.offset() + 1) % snapshotPeriod == 0){
-                                System.out.println("Taking a snapshot. Smiiile");
+                            if ((record.offset() + 1) % snapshotPeriod == 0) {
+                                System.out.println("Snapshot Period reached. Consuming ordering");
+                                takeSnapshot();
+                                //consumeSnapshotOrdering();
                             }
                             shouldRespond(message, false);
                         }
@@ -257,20 +289,72 @@ public class Main {
                 }
             }
 
+            private void takeSnapshot() {
+                String nextReplica = "";
+                try {
+                    //consumeSnapshotOrdering();
+                    nextReplica = getNextReplicaInSnapshotOrdering();
+                } catch (InvalidProtocolBufferException e) {
+                    throw new RuntimeException(e);
+                }
+                System.out.println("Replica to take a snapshot is: " + nextReplica);
+            }
+
+            private String getNextReplicaInSnapshotOrdering() throws InvalidProtocolBufferException {
+                System.out.println("consuming from ordering...");
+//                TopicPartition partition = new TopicPartition(snapshotOrderingTopicName, 0);
+//                snapshotOrderingConsumer.seek(partition, 0);
+                String nextReplica = "";
+                while(nextReplica.equals("")) {
+                    var records = snapshotOrderingConsumer.poll(Duration.ofSeconds(1));
+                    System.out.println("polling done...");
+                    long offset = 0;
+                    for (var record : records) {
+                        System.out.println(record.headers());
+                        System.out.println(record.timestamp());
+                        System.out.println(record.timestampType());
+                        System.out.println(record.offset());
+                        TopicPartition partition = new TopicPartition(snapshotOrderingTopicName, 0);
+                        snapshotOrderingConsumer.seek(partition, record.offset() + 1);
+                        SnapshotOrdering message = SnapshotOrdering.parseFrom(record.value());
+                        nextReplica = message.getReplicaId();
+                        break;
+                    }
+                }
+                return nextReplica;
+            }
+
+            void consumeSnapshotOrdering() throws InvalidProtocolBufferException {
+                //while (true) {
+                //System.out.println("consuming from ordering...");
+                var records = snapshotOrderingConsumer.poll(Duration.ofSeconds(1));
+                //System.out.println("consuming from ordering...");
+                //SnapshotOrdering message = null;
+                for (var record : records) {
+                    System.out.println(record.headers());
+                    System.out.println(record.timestamp());
+                    System.out.println(record.timestampType());
+                    System.out.println(record.offset());
+                    SnapshotOrdering message = SnapshotOrdering.parseFrom(record.value());
+                    System.out.println(message.getReplicaId());
+                    break;
+                }
+                //}
+            }
+
             private void shouldRespond(PublishedItem message, boolean isIncRequest) {
-                if(isIncRequest){
+                if (isIncRequest) {
                     IncRequest incRequest = message.getInc();
                     var clientXid = incRequest.getXid();
-                    if(incResponseObserverMap.containsKey(clientXid)){
+                    if (incResponseObserverMap.containsKey(clientXid)) {
                         var responseObserver = incResponseObserverMap.get(clientXid);
                         responseObserver.onNext(IncResponse.newBuilder().build());
                         responseObserver.onCompleted();
                     }
-                }
-                else{
+                } else {
                     GetRequest getRequest = message.getGet();
                     var clientXid = getRequest.getXid();
-                    if(getResponseObserverMap.containsKey(clientXid)) {
+                    if (getResponseObserverMap.containsKey(clientXid)) {
                         var responseObserver = getResponseObserverMap.get(clientXid);
                         Integer valueRequested = hashTable.get(getRequest.getKey());
                         responseObserver.onNext(GetResponse.newBuilder().setValue(valueRequested).build());
@@ -310,9 +394,9 @@ public class Main {
                 //servingClientXids.add(clientXid);
                 incResponseObserverMap.put(clientXid, responseObserver);
                 PublishedItem incPublish = PublishedItem.newBuilder().setInc(request).build();
-                var incRequestInBytes = incPublish.toByteArray();
+                //var incRequestInBytes = incPublish.toByteArray();
                 try {
-                    publish(operationsTopicName, incRequestInBytes);
+                    publish(operationsTopicName, incPublish.toByteArray());
                 } catch (IOException e) {
                     throw new RuntimeException(e);
                 }
@@ -335,13 +419,12 @@ public class Main {
                 //servingClientXids.add(clientXid);
                 getResponseObserverMap.put(clientXid, responseObserver);
                 PublishedItem getPublish = PublishedItem.newBuilder().setGet(request).build();
-                var getRequestInBytes = getPublish.toByteArray();
+                //var getRequestInBytes = getPublish.toByteArray();
                 try {
-                    publish(operationsTopicName, getRequestInBytes);
+                    publish(operationsTopicName, getPublish.toByteArray());
                 } catch (IOException e) {
                     throw new RuntimeException(e);
                 }
-
 
 
             }
@@ -392,15 +475,15 @@ public class Main {
 
         @Command
         void inc(@Parameters(paramLabel = "key") String key,
-                @Parameters(paramLabel = "amount") int amount,
+                 @Parameters(paramLabel = "amount") int amount,
                  @Parameters(paramLabel = "grpcHost:port") String[] servers,
-                @Option(names = "--repeat") boolean repeat,
-                @Option(names = "--concurrent") boolean concurrent) {
+                 @Option(names = "--repeat") boolean repeat,
+                 @Option(names = "--concurrent") boolean concurrent) {
             //servers = serverPorts.split(",");
             int count = repeat ? 2 : 1;
             var clientXid = ClientXid.newBuilder().setClientid(clientId).setCounter((int) (System.currentTimeMillis() / 1000)).build();
             System.out.println(clientXid);
-            System.out.println("server to connect to: "+ Arrays.toString(servers));
+            System.out.println("server to connect to: " + Arrays.toString(servers));
             //var server = servers[0];
             for (int i = 0; i < count; i++) {
                 var s = Arrays.stream(servers);
@@ -506,7 +589,6 @@ public class Main {
             }
             return 0;
         }
-
 
 
         @Override
