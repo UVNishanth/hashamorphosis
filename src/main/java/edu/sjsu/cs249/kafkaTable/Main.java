@@ -1,5 +1,9 @@
 //TODO: 1. work on snapshot ordering and creating snapshots when snapshot period is reached.
 //TODO: 2. reading snapshots on coming up. remember to always read the last snapshot in the snapshot topic
+//TODO DONE: 3. add callback to subscribe so that consumer is set up with the topic
+//TODO DONE: 4. set replica kafka property session timeout ms config to "10000" and then locks or semaphores to release when onPartitionAssigned and acquire above poll while
+//TODO: 5. either lock producer or have diff producers for each topic
+//TODO: 6. seek after dummy poll might cause not yet assigned exception. do a catch where it polls until it forms the partition
 
 // My IP: 172.27.24.15
 package edu.sjsu.cs249.kafkaTable;
@@ -138,6 +142,12 @@ public class Main {
             //KafkaProducer<String, byte[]> snapshotOrderingProducer;
             KafkaConsumer<String, byte[]> snapshotOrderingConsumer;
 
+            long operationsStartOffset = 0;
+            long snapshotStartOffset = 0;
+
+            long snapshotOrderingStartOffset = 1;
+
+
             private void setupProducer() {
                 var properties = new Properties();
                 properties.put(AdminClientConfig.BOOTSTRAP_SERVERS_CONFIG, kafkaServer);
@@ -180,10 +190,10 @@ public class Main {
                     }
                 });
                 var dummyPoll = operationsConsumer.poll(Duration.ofSeconds(1));
-                if(!dummyPoll.isEmpty()) {
+                //if(!dummyPoll.isEmpty()) {
                     TopicPartition partition1 = new TopicPartition(operationsTopicName, 0);
-                    operationsConsumer.seek(partition1, 0);
-                }
+                    operationsConsumer.seek(partition1, operationsStartOffset);
+                //}
                 System.out.println("operations dummy poll empty?: "+dummyPoll.isEmpty());
 
 
@@ -205,10 +215,10 @@ public class Main {
                     }
                 });
                 dummyPoll = snapshotConsumer.poll(Duration.ofSeconds(1));
-                if(!dummyPoll.isEmpty()) {
-                    TopicPartition partition1 = new TopicPartition(snapshotTopicName, 0);
-                    snapshotConsumer.seek(partition1, 0);
-                }
+                //if(!dummyPoll.isEmpty()) {
+                    partition1 = new TopicPartition(snapshotTopicName, 0);
+                    snapshotConsumer.seek(partition1, snapshotStartOffset);
+                //}
                 System.out.println("snapshot dummy poll empty?: "+dummyPoll.isEmpty());
 
                 properties.setProperty(ConsumerConfig.GROUP_ID_CONFIG, replicaName + "snapshotOrdering");
@@ -229,10 +239,10 @@ public class Main {
                     }
                 });
                 dummyPoll = snapshotOrderingConsumer.poll(Duration.ofSeconds(1));
-                if(!dummyPoll.isEmpty()) {
-                    TopicPartition partition1 = new TopicPartition(snapshotOrderingTopicName, 0);
-                    snapshotOrderingConsumer.seek(partition1, 0);
-                }
+                //if(!dummyPoll.isEmpty()) {
+                    partition1 = new TopicPartition(snapshotOrderingTopicName, 0);
+                    snapshotOrderingConsumer.seek(partition1, snapshotOrderingStartOffset);
+//                /}
                 System.out.println("snapshotOrdering dummy poll empty?: "+dummyPoll.isEmpty());
             }
 
