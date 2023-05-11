@@ -12,10 +12,13 @@ import org.apache.kafka.clients.admin.Admin;
 import org.apache.kafka.clients.admin.AdminClientConfig;
 import org.apache.kafka.clients.admin.NewTopic;
 import org.apache.kafka.clients.consumer.ConsumerConfig;
+import org.apache.kafka.clients.consumer.ConsumerRebalanceListener;
 import org.apache.kafka.clients.consumer.KafkaConsumer;
 import org.apache.kafka.clients.producer.KafkaProducer;
 import org.apache.kafka.clients.producer.ProducerRecord;
+import org.apache.kafka.common.TopicIdPartition;
 import org.apache.kafka.common.TopicPartition;
+import org.apache.kafka.common.internals.Topic;
 import org.apache.kafka.common.serialization.ByteArrayDeserializer;
 import org.apache.kafka.common.serialization.ByteArraySerializer;
 import org.apache.kafka.common.serialization.StringDeserializer;
@@ -30,6 +33,7 @@ import java.io.IOException;
 import java.io.InputStreamReader;
 import java.time.Duration;
 import java.util.Arrays;
+import java.util.Collection;
 import java.util.List;
 import java.util.Properties;
 import java.util.concurrent.Callable;
@@ -147,21 +151,89 @@ public class Main {
                 var properties = new Properties();
                 properties.put(AdminClientConfig.BOOTSTRAP_SERVERS_CONFIG, kafkaServer);
                 properties.setProperty(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "earliest");
-                properties.setProperty(ConsumerConfig.GROUP_ID_CONFIG, replicaName);
                 properties.setProperty(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, "true");
-
+                properties.setProperty(ConsumerConfig.SESSION_TIMEOUT_MS_CONFIG, "10000");
+                properties.setProperty(ConsumerConfig.GROUP_ID_CONFIG, replicaName + "operations");
                 operationsConsumer = new KafkaConsumer<>(properties, new StringDeserializer(), new ByteArrayDeserializer());
-                operationsConsumer.subscribe(List.of(operationsTopicName));
+//                operationsConsumer.subscribe(List.of(operationsTopicName));
+//                var dummyPoll = operationsConsumer.poll(Duration.ofSeconds(1));
+//
+//                snapshotConsumer = new KafkaConsumer<>(properties, new StringDeserializer(), new ByteArrayDeserializer());
+//                snapshotConsumer.subscribe(List.of(snapshotTopicName));
+//                dummyPoll = snapshotConsumer.poll(Duration.ofSeconds(1));
+//
+//                snapshotOrderingConsumer = new KafkaConsumer<>(properties, new StringDeserializer(), new ByteArrayDeserializer());
+//                snapshotOrderingConsumer.subscribe(List.of(snapshotOrderingTopicName));
+//                dummyPoll = snapshotOrderingConsumer.poll(Duration.ofSeconds(1));
+                operationsConsumer.subscribe(List.of(operationsTopicName), new ConsumerRebalanceListener() {
+                    @Override
+                    public void onPartitionsRevoked(Collection<TopicPartition> collection) {
+                        System.out.println("Didn't expect the revoke!");
+                    }
+
+                    @Override
+                    public void onPartitionsAssigned(Collection<TopicPartition> collection) {
+                        System.out.println("Operations Partition assigned");
+                        //collection.forEach(t -> operationsConsumer.seek(t, 0));
+
+                        //semOperations.release();
+                    }
+                });
                 var dummyPoll = operationsConsumer.poll(Duration.ofSeconds(1));
+                if(!dummyPoll.isEmpty()) {
+                    TopicPartition partition1 = new TopicPartition(operationsTopicName, 0);
+                    operationsConsumer.seek(partition1, 0);
+                }
+                System.out.println("operations dummy poll empty?: "+dummyPoll.isEmpty());
 
+
+                properties.setProperty(ConsumerConfig.GROUP_ID_CONFIG, replicaName + "snapshot");
                 snapshotConsumer = new KafkaConsumer<>(properties, new StringDeserializer(), new ByteArrayDeserializer());
-                snapshotConsumer.subscribe(List.of(snapshotTopicName));
+                snapshotConsumer.subscribe(List.of(snapshotTopicName), new ConsumerRebalanceListener() {
+                    @Override
+                    public void onPartitionsRevoked(Collection<TopicPartition> collection) {
+                        System.out.println("Didn't expect the revoke!");
+                    }
+
+                    @Override
+                    public void onPartitionsAssigned(Collection<TopicPartition> collection) {
+                        System.out.println("Snapshot Partition assigned");
+//                        collection.forEach(t -> snapshotConsumer.seek(t, 0));
+//                        TopicPartition partition1 = new TopicPartition(snapshotTopicName, 0);
+//                        snapshotConsumer.seek(partition1, 0);
+                        //semSnapshot.release();
+                    }
+                });
                 dummyPoll = snapshotConsumer.poll(Duration.ofSeconds(1));
+                if(!dummyPoll.isEmpty()) {
+                    TopicPartition partition1 = new TopicPartition(snapshotTopicName, 0);
+                    snapshotConsumer.seek(partition1, 0);
+                }
+                System.out.println("snapshot dummy poll empty?: "+dummyPoll.isEmpty());
 
+                properties.setProperty(ConsumerConfig.GROUP_ID_CONFIG, replicaName + "snapshotOrdering");
                 snapshotOrderingConsumer = new KafkaConsumer<>(properties, new StringDeserializer(), new ByteArrayDeserializer());
-                snapshotOrderingConsumer.subscribe(List.of(snapshotOrderingTopicName));
-                dummyPoll = snapshotOrderingConsumer.poll(Duration.ofSeconds(1));
+                snapshotOrderingConsumer.subscribe(List.of(snapshotOrderingTopicName), new ConsumerRebalanceListener() {
+                    @Override
+                    public void onPartitionsRevoked(Collection<TopicPartition> collection) {
+                        System.out.println("Didn't expect the revoke!");
+                    }
 
+                    @Override
+                    public void onPartitionsAssigned(Collection<TopicPartition> collection) {
+                        System.out.println("SnapshotOrdering Partition assigned");
+//                        collection.forEach(t -> snapshotOrderingConsumer.seek(t, 0));
+//                        TopicPartition partition1 = new TopicPartition(snapshotOrderingTopicName, 0);
+//                        snapshotOrderingConsumer.seek(partition1, 0);
+                        //semSnaphotOrdering.release();
+                    }
+                });
+                dummyPoll = snapshotOrderingConsumer.poll(Duration.ofSeconds(1));
+                if(!dummyPoll.isEmpty()) {
+                    TopicPartition partition1 = new TopicPartition(snapshotOrderingTopicName, 0);
+                    snapshotOrderingConsumer.seek(partition1, 0);
+                }
+                System.out.println("snapshotOrdering dummy poll empty?: "+dummyPoll.isEmpty());
             }
 
 
@@ -302,10 +374,10 @@ public class Main {
 
             private String getNextReplicaInSnapshotOrdering() throws InvalidProtocolBufferException {
                 System.out.println("consuming from ordering...");
-//                TopicPartition partition = new TopicPartition(snapshotOrderingTopicName, 0);
-//                snapshotOrderingConsumer.seek(partition, 0);
+//                TopicPartition partition1 = new TopicPartition(snapshotOrderingTopicName, 0);
+//                snapshotOrderingConsumer.seek(partition1, 0);
                 String nextReplica = "";
-                while(nextReplica.equals("")) {
+                while (nextReplica.equals("")) {
                     var records = snapshotOrderingConsumer.poll(Duration.ofSeconds(1));
                     System.out.println("polling done...");
                     long offset = 0;
@@ -325,21 +397,22 @@ public class Main {
             }
 
             void consumeSnapshotOrdering() throws InvalidProtocolBufferException {
-                //while (true) {
-                //System.out.println("consuming from ordering...");
-                var records = snapshotOrderingConsumer.poll(Duration.ofSeconds(1));
-                //System.out.println("consuming from ordering...");
-                //SnapshotOrdering message = null;
-                for (var record : records) {
-                    System.out.println(record.headers());
-                    System.out.println(record.timestamp());
-                    System.out.println(record.timestampType());
-                    System.out.println(record.offset());
-                    SnapshotOrdering message = SnapshotOrdering.parseFrom(record.value());
-                    System.out.println(message.getReplicaId());
-                    break;
+                System.out.println("consuming snapshot ordering...");
+                while (true) {
+                    //System.out.println("consuming from ordering...");
+                    var records = snapshotOrderingConsumer.poll(Duration.ofSeconds(1));
+                    //System.out.println("consuming from ordering...");
+                    //SnapshotOrdering message = null;
+                    for (var record : records) {
+                        System.out.println(record.headers());
+                        System.out.println(record.timestamp());
+                        System.out.println(record.timestampType());
+                        System.out.println(record.offset());
+                        SnapshotOrdering message = SnapshotOrdering.parseFrom(record.value());
+                        System.out.println(message.getReplicaId());
+                        //break;
+                    }
                 }
-                //}
             }
 
             private void shouldRespond(PublishedItem message, boolean isIncRequest) {
