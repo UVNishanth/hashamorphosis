@@ -20,9 +20,7 @@ import org.apache.kafka.clients.consumer.ConsumerRebalanceListener;
 import org.apache.kafka.clients.consumer.KafkaConsumer;
 import org.apache.kafka.clients.producer.KafkaProducer;
 import org.apache.kafka.clients.producer.ProducerRecord;
-import org.apache.kafka.common.TopicIdPartition;
 import org.apache.kafka.common.TopicPartition;
-import org.apache.kafka.common.internals.Topic;
 import org.apache.kafka.common.serialization.ByteArrayDeserializer;
 import org.apache.kafka.common.serialization.ByteArraySerializer;
 import org.apache.kafka.common.serialization.StringDeserializer;
@@ -36,10 +34,7 @@ import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStreamReader;
 import java.time.Duration;
-import java.util.Arrays;
-import java.util.Collection;
-import java.util.List;
-import java.util.Properties;
+import java.util.*;
 import java.util.concurrent.Callable;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutionException;
@@ -145,8 +140,20 @@ public class Main {
             long operationsStartOffset = 0;
             long snapshotStartOffset = 0;
 
-            long snapshotOrderingStartOffset = 1;
+            long snapshotOrderingStartOffset = 0;
 
+            void gotoOffset(KafkaConsumer<String, byte[]> consumer, TopicPartition topicPartition, long offset){
+                try{
+                    consumer.seek(topicPartition, offset);
+                }
+                catch(IllegalStateException e){
+                    consumer.poll(Duration.ofSeconds(1));
+                    gotoOffset(consumer, topicPartition, offset);
+                }
+//                finally{
+//                    consumer.seek(topicPartition, offset);
+//                }
+            }
 
             private void setupProducer() {
                 var properties = new Properties();
@@ -189,12 +196,13 @@ public class Main {
                         //semOperations.release();
                     }
                 });
-                var dummyPoll = operationsConsumer.poll(Duration.ofSeconds(1));
+                //var dummyPoll = operationsConsumer.poll(Duration.ofSeconds(1));
                 //if(!dummyPoll.isEmpty()) {
                     TopicPartition partition1 = new TopicPartition(operationsTopicName, 0);
-                    operationsConsumer.seek(partition1, operationsStartOffset);
+                    //operationsConsumer.seek(partition1, operationsStartOffset);
+                gotoOffset(operationsConsumer, partition1, operationsStartOffset);
                 //}
-                System.out.println("operations dummy poll empty?: "+dummyPoll.isEmpty());
+                //System.out.println("operations dummy poll empty?: "+dummyPoll.isEmpty());
 
 
                 properties.setProperty(ConsumerConfig.GROUP_ID_CONFIG, replicaName + "snapshot");
@@ -214,12 +222,13 @@ public class Main {
                         //semSnapshot.release();
                     }
                 });
-                dummyPoll = snapshotConsumer.poll(Duration.ofSeconds(1));
+                //dummyPoll = snapshotConsumer.poll(Duration.ofSeconds(1));
                 //if(!dummyPoll.isEmpty()) {
                     partition1 = new TopicPartition(snapshotTopicName, 0);
-                    snapshotConsumer.seek(partition1, snapshotStartOffset);
+                    //snapshotConsumer.seek(partition1, snapshotStartOffset);
+                gotoOffset(snapshotConsumer, partition1, snapshotStartOffset);
                 //}
-                System.out.println("snapshot dummy poll empty?: "+dummyPoll.isEmpty());
+                //System.out.println("snapshot dummy poll empty?: "+dummyPoll.isEmpty());
 
                 properties.setProperty(ConsumerConfig.GROUP_ID_CONFIG, replicaName + "snapshotOrdering");
                 snapshotOrderingConsumer = new KafkaConsumer<>(properties, new StringDeserializer(), new ByteArrayDeserializer());
@@ -238,12 +247,13 @@ public class Main {
                         //semSnaphotOrdering.release();
                     }
                 });
-                dummyPoll = snapshotOrderingConsumer.poll(Duration.ofSeconds(1));
+                //dummyPoll = snapshotOrderingConsumer.poll(Duration.ofSeconds(1));
                 //if(!dummyPoll.isEmpty()) {
                     partition1 = new TopicPartition(snapshotOrderingTopicName, 0);
-                    snapshotOrderingConsumer.seek(partition1, snapshotOrderingStartOffset);
+                    //snapshotOrderingConsumer.seek(partition1, snapshotOrderingStartOffset);
+                    gotoOffset(snapshotOrderingConsumer, partition1, snapshotOrderingStartOffset);
 //                /}
-                System.out.println("snapshotOrdering dummy poll empty?: "+dummyPoll.isEmpty());
+                //System.out.println("snapshotOrdering dummy poll empty?: "+dummyPoll.isEmpty());
             }
 
 
@@ -348,25 +358,29 @@ public class Main {
                         System.out.println(record.offset());
                         PublishedItem message = PublishedItem.parseFrom(record.value());
                         if (message.hasInc()) {
-                            System.out.println("PublishedItem is proper");
+                            //System.out.println("PublishedItem is proper");
                             IncRequest incRequest = message.getInc();
-                            applyIncRequest(incRequest);
-                            if ((record.offset() + 1) % snapshotPeriod == 0) {
-                                System.out.println("Snapshot Period reached. Consuming ordering");
-                                takeSnapshot();
-                                //consumeSnapshotOrdering();
+                            if (!isNewClientRequest(incRequest.getXid())) {
+                                System.out.println("Client IncRequest has old Xid. Not processing");
                             }
-                            shouldRespond(message, true);
+                            else {
+                                applyIncRequest(incRequest);
+                                    //consumeSnapshotOrdering();
+                            }
                         } else {
                             GetRequest getRequest = message.getGet();
-                            applyGetRequest(getRequest);
-                            if ((record.offset() + 1) % snapshotPeriod == 0) {
-                                System.out.println("Snapshot Period reached. Consuming ordering");
-                                takeSnapshot();
-                                //consumeSnapshotOrdering();
+                            if (!isNewClientRequest(getRequest.getXid())) {
+                                System.out.println("Client GetRequest has old Xid. Not processing");
                             }
-                            shouldRespond(message, false);
+                            else {
+                                applyGetRequest(getRequest);
+                            }
                         }
+                        if ((record.offset() + 1) % snapshotPeriod == 0) {
+                            System.out.println("Snapshot Period reached. Consuming ordering");
+                            takeSnapshot();
+                        }
+                        shouldRespond(message, message.hasInc());
                     }
                 }
             }
@@ -431,8 +445,13 @@ public class Main {
                     var clientXid = incRequest.getXid();
                     if (incResponseObserverMap.containsKey(clientXid)) {
                         var responseObserver = incResponseObserverMap.get(clientXid);
-                        responseObserver.onNext(IncResponse.newBuilder().build());
-                        responseObserver.onCompleted();
+                        try {
+                            responseObserver.onNext(IncResponse.newBuilder().build());
+                            responseObserver.onCompleted();
+                        }
+                        catch(IllegalStateException e){
+                            System.out.println("catching stream exception...");
+                        }
                     }
                 } else {
                     GetRequest getRequest = message.getGet();
@@ -559,10 +578,10 @@ public class Main {
         @Command
         void inc(@Parameters(paramLabel = "key") String key,
                  @Parameters(paramLabel = "amount") int amount,
-                 @Parameters(paramLabel = "grpcHost:port") String[] servers,
+                 @Parameters(paramLabel = "grpcHost:port") String serverList,
                  @Option(names = "--repeat") boolean repeat,
                  @Option(names = "--concurrent") boolean concurrent) {
-            //servers = serverPorts.split(",");
+            String[] servers = serverList.split(",");
             int count = repeat ? 2 : 1;
             var clientXid = ClientXid.newBuilder().setClientid(clientId).setCounter((int) (System.currentTimeMillis() / 1000)).build();
             System.out.println(clientXid);
@@ -672,6 +691,48 @@ public class Main {
             }
             return 0;
         }
+
+        @Command(description = "delete the operations, snapshotOrder, and snapshot topics for a given prefix")
+        int deleteTableTopics(@Parameters(paramLabel = "kafkaHost:port") String server,
+                              @Parameters(paramLabel = "prefix") String prefix) throws ExecutionException, InterruptedException {
+            var properties = new Properties();
+            properties.put(AdminClientConfig.BOOTSTRAP_SERVERS_CONFIG, server);
+            try (var admin = Admin.create(properties)) {
+                List<String> topics = List.of(
+                        prefix + "operations",
+                        prefix + "snapshot",
+                        prefix + "snapshotOrdering"
+                );
+                admin.deleteTopics(topics);
+                System.out.println("deleted topics: " + Arrays.toString(topics.toArray()));
+            }
+            return 0;
+        }
+        @Command(description = "create the operations, snapshotOrder, and snapshot topics for a given prefix")
+        int createTableTopics(@Parameters(paramLabel = "kafkaHost:port") String server,
+                              @Parameters(paramLabel = "prefix") String prefix) throws ExecutionException, InterruptedException {
+            var properties = new Properties();
+            properties.put(AdminClientConfig.BOOTSTRAP_SERVERS_CONFIG, server);
+            try (var admin = Admin.create(properties)) {
+                var rc = admin.createTopics(List.of(
+                        new NewTopic(prefix + "operations", 1, (short) 1),
+                        new NewTopic(prefix + "snapshot", 1, (short) 1),
+                        new NewTopic(prefix + "snapshotOrdering", 1, (short) 1)
+                ));
+                rc.all().get();
+            }
+            var producer = new KafkaProducer<>(properties, new StringSerializer(), new ByteArraySerializer());
+            var result = producer.send(new ProducerRecord<>(prefix + "snapshot", Snapshot.newBuilder()
+                    .setReplicaId("initializer")
+                    .setOperationsOffset(-1)
+                    .setSnapshotOrderingOffset(-1)
+                    .putAllTable(Map.of())
+                    .putAllClientCounters(Map.of())
+                    .build().toByteArray()));
+            result.get();
+            return 0;
+        }
+
 
 
         @Override
