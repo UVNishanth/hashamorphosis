@@ -1,9 +1,10 @@
-//TODO: 1. work on snapshot ordering and creating snapshots when snapshot period is reached.
-//TODO: 2. reading snapshots on coming up. remember to always read the last snapshot in the snapshot topic
+//TODO: DONE 1. work on snapshot ordering and creating snapshots when snapshot period is reached.
+//TODO: DONE 2. reading snapshots on coming up. remember to always read the last snapshot in the snapshot topic
 //TODO DONE: 3. add callback to subscribe so that consumer is set up with the topic
 //TODO DONE: 4. set replica kafka property session timeout ms config to "10000" and then locks or semaphores to release when onPartitionAssigned and acquire above poll while
 //TODO: 5. either lock producer or have diff producers for each topic
-//TODO: 6. seek after dummy poll might cause not yet assigned exception. do a catch where it polls until it forms the partition
+//TODO: DONE 6. seek after dummy poll might cause not yet assigned exception. do a catch where it polls until it forms the partition
+// TODO: 7. check if already present in snapshotOrdering topic before adding replica name
 
 // My IP: 172.27.24.15
 package edu.sjsu.cs249.kafkaTable;
@@ -17,6 +18,7 @@ import org.apache.kafka.clients.admin.AdminClientConfig;
 import org.apache.kafka.clients.admin.NewTopic;
 import org.apache.kafka.clients.consumer.ConsumerConfig;
 import org.apache.kafka.clients.consumer.ConsumerRebalanceListener;
+import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.apache.kafka.clients.consumer.KafkaConsumer;
 import org.apache.kafka.clients.producer.KafkaProducer;
 import org.apache.kafka.clients.producer.ProducerRecord;
@@ -38,6 +40,7 @@ import java.util.*;
 import java.util.concurrent.Callable;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutionException;
+import java.util.concurrent.Semaphore;
 import java.util.stream.Collectors;
 
 import io.grpc.*;
@@ -142,11 +145,10 @@ public class Main {
 
             long snapshotOrderingStartOffset = 0;
 
-            void gotoOffset(KafkaConsumer<String, byte[]> consumer, TopicPartition topicPartition, long offset){
-                try{
+            void gotoOffset(KafkaConsumer<String, byte[]> consumer, TopicPartition topicPartition, long offset) {
+                try {
                     consumer.seek(topicPartition, offset);
-                }
-                catch(IllegalStateException e){
+                } catch (IllegalStateException e) {
                     consumer.poll(Duration.ofSeconds(1));
                     gotoOffset(consumer, topicPartition, offset);
                 }
@@ -165,6 +167,8 @@ public class Main {
             }
 
             private void setupConsumers() {
+                System.out.println("Topic names as follows: " + operationsTopicName + " "
+                        + snapshotTopicName + " " + snapshotOrderingTopicName);
                 var properties = new Properties();
                 properties.put(AdminClientConfig.BOOTSTRAP_SERVERS_CONFIG, kafkaServer);
                 properties.setProperty(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "earliest");
@@ -198,38 +202,11 @@ public class Main {
                 });
                 //var dummyPoll = operationsConsumer.poll(Duration.ofSeconds(1));
                 //if(!dummyPoll.isEmpty()) {
-                    TopicPartition partition1 = new TopicPartition(operationsTopicName, 0);
-                    //operationsConsumer.seek(partition1, operationsStartOffset);
+                TopicPartition partition1 = new TopicPartition(operationsTopicName, 0);
+                //operationsConsumer.seek(partition1, operationsStartOffset);
                 gotoOffset(operationsConsumer, partition1, operationsStartOffset);
                 //}
                 //System.out.println("operations dummy poll empty?: "+dummyPoll.isEmpty());
-
-
-                properties.setProperty(ConsumerConfig.GROUP_ID_CONFIG, replicaName + "snapshot");
-                snapshotConsumer = new KafkaConsumer<>(properties, new StringDeserializer(), new ByteArrayDeserializer());
-                snapshotConsumer.subscribe(List.of(snapshotTopicName), new ConsumerRebalanceListener() {
-                    @Override
-                    public void onPartitionsRevoked(Collection<TopicPartition> collection) {
-                        System.out.println("Didn't expect the revoke!");
-                    }
-
-                    @Override
-                    public void onPartitionsAssigned(Collection<TopicPartition> collection) {
-                        System.out.println("Snapshot Partition assigned");
-//                        collection.forEach(t -> snapshotConsumer.seek(t, 0));
-//                        TopicPartition partition1 = new TopicPartition(snapshotTopicName, 0);
-//                        snapshotConsumer.seek(partition1, 0);
-                        //semSnapshot.release();
-                    }
-                });
-                //dummyPoll = snapshotConsumer.poll(Duration.ofSeconds(1));
-                //if(!dummyPoll.isEmpty()) {
-                    partition1 = new TopicPartition(snapshotTopicName, 0);
-                    //snapshotConsumer.seek(partition1, snapshotStartOffset);
-                gotoOffset(snapshotConsumer, partition1, snapshotStartOffset);
-                //}
-                //System.out.println("snapshot dummy poll empty?: "+dummyPoll.isEmpty());
-
                 properties.setProperty(ConsumerConfig.GROUP_ID_CONFIG, replicaName + "snapshotOrdering");
                 snapshotOrderingConsumer = new KafkaConsumer<>(properties, new StringDeserializer(), new ByteArrayDeserializer());
                 snapshotOrderingConsumer.subscribe(List.of(snapshotOrderingTopicName), new ConsumerRebalanceListener() {
@@ -249,20 +226,80 @@ public class Main {
                 });
                 //dummyPoll = snapshotOrderingConsumer.poll(Duration.ofSeconds(1));
                 //if(!dummyPoll.isEmpty()) {
-                    partition1 = new TopicPartition(snapshotOrderingTopicName, 0);
-                    //snapshotOrderingConsumer.seek(partition1, snapshotOrderingStartOffset);
-                    gotoOffset(snapshotOrderingConsumer, partition1, snapshotOrderingStartOffset);
+                partition1 = new TopicPartition(snapshotOrderingTopicName, 0);
+                //snapshotOrderingConsumer.seek(partition1, snapshotOrderingStartOffset);
+                gotoOffset(snapshotOrderingConsumer, partition1, snapshotOrderingStartOffset);
 //                /}
                 //System.out.println("snapshotOrdering dummy poll empty?: "+dummyPoll.isEmpty());
+
+                properties.setProperty(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "latest");
+                properties.setProperty(ConsumerConfig.GROUP_ID_CONFIG, replicaName + "snapshot");
+                snapshotConsumer = new KafkaConsumer<>(properties, new StringDeserializer(), new ByteArrayDeserializer());
+                snapshotConsumer.subscribe(List.of(snapshotTopicName), new ConsumerRebalanceListener() {
+                    @Override
+                    public void onPartitionsRevoked(Collection<TopicPartition> collection) {
+                        System.out.println("Didn't expect the revoke!");
+                    }
+
+                    @Override
+                    public void onPartitionsAssigned(Collection<TopicPartition> collection) {
+                        System.out.println("Snapshot Partition assigned");
+//                        collection.forEach(t -> snapshotConsumer.seek(t, 0));
+//                        TopicPartition partition1 = new TopicPartition(snapshotTopicName, 0);
+//                        snapshotConsumer.seek(partition1, 0);
+                        //semSnapshot.release();
+                    }
+                });
+                //dummyPoll = snapshotConsumer.poll(Duration.ofSeconds(1));
+                //if(!dummyPoll.isEmpty()) {
+                partition1 = new TopicPartition(snapshotTopicName, 0);
+                //snapshotConsumer.seek(partition1, snapshotStartOffset);
+                gotoOffset(snapshotConsumer, partition1, snapshotStartOffset);
+                //}
+                //System.out.println("snapshot dummy poll empty?: "+dummyPoll.isEmpty());
+
+            }
+
+            void setupState() throws InvalidProtocolBufferException {
+                var records = snapshotConsumer.poll(Duration.ofSeconds(1));
+                ConsumerRecord<String, byte[]> latestRecord = null;
+                for (var record : records) {
+                    System.out.println(record.headers());
+                    System.out.println(record.timestamp());
+                    System.out.println(record.timestampType());
+                    System.out.println(record.offset());
+                    latestRecord = record;
+                }
+                if(latestRecord == null){
+                    System.out.println("Snapshot topic empty");
+                    return;
+                }
+                Snapshot snapshot = Snapshot.parseFrom(latestRecord.value());
+                System.out.println(snapshot);
+                gotoOffset(operationsConsumer, new TopicPartition(operationsTopicName, 0),
+                        snapshot.getOperationsOffset());
+                gotoOffset(snapshotOrderingConsumer, new TopicPartition(snapshotOrderingTopicName, 0),
+                        snapshot.getSnapshotOrderingOffset());
+                clientRequestXidMap.putAll(snapshot.getClientCountersMap());
+                System.out.println("Client counter map is: "+clientRequestXidMap);
+                hashTable.putAll(snapshot.getTableMap());
+                System.out.println("Hash table is: "+hashTable);
+
+
             }
 
 
-            public KafkaTableService() {
+            public KafkaTableService(){
                 operationsTopicName = groupId + "operations";
                 snapshotTopicName = groupId + "snapshot";
                 snapshotOrderingTopicName = groupId + "snapshotOrdering";
                 setupProducer();
                 setupConsumers();
+                try {
+                    setupState();
+                } catch (InvalidProtocolBufferException e) {
+                    throw new RuntimeException(e);
+                }
                 addSelfToSnapshotOrdering();
                 new Thread(() -> {
                     try {
@@ -362,30 +399,28 @@ public class Main {
                             IncRequest incRequest = message.getInc();
                             if (!isNewClientRequest(incRequest.getXid())) {
                                 System.out.println("Client IncRequest has old Xid. Not processing");
-                            }
-                            else {
+                            } else {
                                 applyIncRequest(incRequest);
-                                    //consumeSnapshotOrdering();
+                                //consumeSnapshotOrdering();
                             }
                         } else {
                             GetRequest getRequest = message.getGet();
                             if (!isNewClientRequest(getRequest.getXid())) {
                                 System.out.println("Client GetRequest has old Xid. Not processing");
-                            }
-                            else {
+                            } else {
                                 applyGetRequest(getRequest);
                             }
                         }
                         if ((record.offset() + 1) % snapshotPeriod == 0) {
                             System.out.println("Snapshot Period reached. Consuming ordering");
-                            takeSnapshot();
+                            onSnapshotTriggered();
                         }
                         shouldRespond(message, message.hasInc());
                     }
                 }
             }
 
-            private void takeSnapshot() {
+            private void onSnapshotTriggered() {
                 String nextReplica = "";
                 try {
                     //consumeSnapshotOrdering();
@@ -394,6 +429,29 @@ public class Main {
                     throw new RuntimeException(e);
                 }
                 System.out.println("Replica to take a snapshot is: " + nextReplica);
+                if (nextReplica.equals(replicaName)) {
+                    takeSnapshot();
+                    addSelfToSnapshotOrdering();
+                }
+            }
+
+            private void takeSnapshot() {
+                TopicPartition partition = new TopicPartition(operationsTopicName, 0);
+                var operationsOffset = operationsConsumer.position(partition);
+                System.out.println("operationsOffset: " + operationsOffset);
+                partition = new TopicPartition(snapshotOrderingTopicName, 0);
+                var snapshotOrderingOffset = snapshotOrderingConsumer.position(partition);
+                System.out.println("snapshotOrdering offset: " + snapshotOrderingOffset);
+                Snapshot snapshot = Snapshot.newBuilder().setReplicaId(replicaName)
+                        .putAllTable(hashTable).setOperationsOffset(operationsOffset)
+                        .putAllClientCounters(clientRequestXidMap)
+                        .setSnapshotOrderingOffset(snapshotOrderingOffset).build();
+                byte[] snapshotInBytes = snapshot.toByteArray();
+                try {
+                    publish(snapshotTopicName, snapshotInBytes);
+                } catch (IOException e) {
+                    throw new RuntimeException(e);
+                }
             }
 
             private String getNextReplicaInSnapshotOrdering() throws InvalidProtocolBufferException {
@@ -448,8 +506,7 @@ public class Main {
                         try {
                             responseObserver.onNext(IncResponse.newBuilder().build());
                             responseObserver.onCompleted();
-                        }
-                        catch(IllegalStateException e){
+                        } catch (IllegalStateException e) {
                             System.out.println("catching stream exception...");
                         }
                     }
@@ -649,12 +706,36 @@ public class Main {
                     @Parameters(paramLabel = "group-id") String id) throws InvalidProtocolBufferException {
             var properties = new Properties();
             properties.put(AdminClientConfig.BOOTSTRAP_SERVERS_CONFIG, server);
-            properties.setProperty(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "earliest");
+            properties.setProperty(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "latest");
+            properties.setProperty(ConsumerConfig.SESSION_TIMEOUT_MS_CONFIG, "10000");
             properties.setProperty(ConsumerConfig.GROUP_ID_CONFIG, id);
             var consumer = new KafkaConsumer<>(properties, new StringDeserializer(), new ByteArrayDeserializer());
-            consumer.subscribe(List.of(name));
+            System.out.println("Starting at " + new Date());
+            var sem = new Semaphore(0);
+            consumer.subscribe(List.of(name), new ConsumerRebalanceListener() {
+                @Override
+                public void onPartitionsRevoked(Collection<TopicPartition> collection) {
+                    System.out.println("Didn't expect the revoke!");
+                }
+
+                @Override
+                public void onPartitionsAssigned(Collection<TopicPartition> collection) {
+                    System.out.println("Partition assigned");
+                    collection.stream().forEach(t -> consumer.seek(t, 0));
+                    //consumer.seekToEnd(collection);
+                    sem.release();
+                }
+            });
+            System.out.println("first poll count: " + consumer.poll(0).count());
+            try {
+                sem.acquire();
+            } catch (InterruptedException e) {
+                throw new RuntimeException(e);
+            }
+            System.out.println("Ready to consume at " + new Date());
             while (true) {
-                var records = consumer.poll(Duration.ofSeconds(1));
+                var records = consumer.poll(Duration.ofSeconds(20));
+                System.out.println("Got: " + records.count());
                 for (var record : records) {
                     System.out.println(record.headers());
                     System.out.println(record.timestamp());
@@ -708,6 +789,7 @@ public class Main {
             }
             return 0;
         }
+
         @Command(description = "create the operations, snapshotOrder, and snapshot topics for a given prefix")
         int createTableTopics(@Parameters(paramLabel = "kafkaHost:port") String server,
                               @Parameters(paramLabel = "prefix") String prefix) throws ExecutionException, InterruptedException {
@@ -732,7 +814,6 @@ public class Main {
             result.get();
             return 0;
         }
-
 
 
         @Override
