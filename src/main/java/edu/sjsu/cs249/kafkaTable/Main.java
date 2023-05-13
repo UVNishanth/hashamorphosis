@@ -38,10 +38,8 @@ import java.io.IOException;
 import java.io.InputStreamReader;
 import java.time.Duration;
 import java.util.*;
-import java.util.concurrent.Callable;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ExecutionException;
-import java.util.concurrent.Semaphore;
+import java.util.concurrent.*;
+import java.util.concurrent.locks.ReentrantLock;
 import java.util.stream.Collectors;
 
 import io.grpc.*;
@@ -90,7 +88,9 @@ public class Main {
 //        static long lastZxidSeen;
 //        static int lastAck = -1;
 
-        //static private ReentrantLock lock = new ReentrantLock();
+        static private ReentrantLock consumerLock = new ReentrantLock();
+
+        static private ReentrantLock producerLock = new ReentrantLock();
 
 
         static ConcurrentHashMap<String, Integer> clientRequestXidMap = new ConcurrentHashMap<>();
@@ -145,6 +145,44 @@ public class Main {
             server.awaitTermination();
             return 0;
         }
+
+        static Snapshot takeSnapshot() {
+        //static void takeSnapshot() {
+            TopicPartition partition = new TopicPartition(operationsTopicName, 0);
+            var operationsOffset = operationsConsumer.position(partition) - 1;
+            System.out.println("Snapshot taken at offsets....");
+            System.out.println("operationsOffset: " + operationsOffset);
+            partition = new TopicPartition(snapshotOrderingTopicName, 0);
+            var snapshotOrderingOffset = snapshotOrderingConsumer.position(partition) - 1;
+            System.out.println("snapshotOrdering offset: " + snapshotOrderingOffset);
+            return Snapshot.newBuilder().setReplicaId(replicaName)
+                    .putAllTable(hashTable).setOperationsOffset(operationsOffset)
+                    .putAllClientCounters(clientRequestXidMap)
+                    .setSnapshotOrderingOffset(snapshotOrderingOffset).build();
+//            byte[] snapshotInBytes = snapshot.toByteArray();
+//            try {
+//                publish(snapshotTopicName, snapshotInBytes);
+//            } catch (IOException e) {
+//                throw new RuntimeException(e);
+//            }
+        }
+
+        static void publish(String topicName, byte[] msg) throws IOException {
+            try {
+                if(producerLock.tryLock(LOCK_WAIT, TimeUnit.SECONDS)) {
+                    //var properties = new Properties();
+                    //properties.put(AdminClientConfig.BOOTSTRAP_SERVERS_CONFIG, kafkaServer);
+                    //varproducer = new KafkaProducer<>(properties, new StringSerializer(), new ByteArraySerializer());
+                    var record = new ProducerRecord<String, byte[]>(topicName, msg);
+                    producer.send(record);
+                    producerLock.unlock();
+                }
+            } catch (InterruptedException e) {
+                throw new RuntimeException(e);
+            }
+        }
+
+
 
         static class KafkaTableService extends KafkaTableGrpc.KafkaTableImplBase {
 
@@ -312,7 +350,7 @@ public class Main {
                 new Thread(() -> {
                     try {
                         consumeOperations();
-                    } catch (IOException e) {
+                    } catch (IOException | InterruptedException e) {
                         throw new RuntimeException(e);
                     }
                 }).start();
@@ -430,48 +468,50 @@ public class Main {
             }
 
 
-            void publish(String topicName, byte[] msg) throws IOException {
-                //var properties = new Properties();
-                //properties.put(AdminClientConfig.BOOTSTRAP_SERVERS_CONFIG, kafkaServer);
-                //varproducer = new KafkaProducer<>(properties, new StringSerializer(), new ByteArraySerializer());
-                var record = new ProducerRecord<String, byte[]>(topicName, msg);
-                producer.send(record);
-            }
 
-            void consumeOperations() throws IOException {
+            void consumeOperations() throws IOException, InterruptedException {
                 while (isOperationsTopicSubscribed) {
-                    var records = operationsConsumer.poll(Duration.ofSeconds(1));
-                    for (var record : records) {
-                        System.out.println("Record topic: "+record.topic());
-                        System.out.println(record.headers());
-                        System.out.println(record.timestamp());
-                        System.out.println(record.timestampType());
-                        System.out.println(record.offset());
-                        PublishedItem message = PublishedItem.parseFrom(record.value());
-                        if (message.hasInc()) {
-                            //System.out.println("PublishedItem is proper");
-                            IncRequest incRequest = message.getInc();
-                            if (!isNewClientRequest(incRequest.getXid())) {
-                                System.out.println("Client IncRequest has old Xid. Not processing");
-                            } else {
-                                applyIncRequest(incRequest);
-                                //consumeSnapshotOrdering();
-                            }
-                        } else {
-                            GetRequest getRequest = message.getGet();
-                            if (!isNewClientRequest(getRequest.getXid())) {
-                                System.out.println("Client GetRequest has old Xid. Not processing");
-                            } else {
-                                applyGetRequest(getRequest);
-                            }
+                    if (consumerLock.tryLock(LOCK_WAIT, TimeUnit.SECONDS)) {
+                        if(!isOperationsTopicSubscribed){
+                            consumerLock.unlock();
+                            continue;
                         }
-                        if ((record.offset() + 1) % snapshotPeriod == 0) {
-                            System.out.println("Snapshot Period reached. Consuming ordering");
-                            onSnapshotTriggered();
+                        var records = operationsConsumer.poll(Duration.ofSeconds(1));
+                        for (var record : records) {
+                            System.out.println("Record topic: " + record.topic());
+                            System.out.println(record.headers());
+                            System.out.println(record.timestamp());
+                            System.out.println(record.timestampType());
+                            System.out.println(record.offset());
+                            PublishedItem message = PublishedItem.parseFrom(record.value());
+                            if (message.hasInc()) {
+                                //System.out.println("PublishedItem is proper");
+                                IncRequest incRequest = message.getInc();
+                                if (!isNewClientRequest(incRequest.getXid())) {
+                                    System.out.println("Client IncRequest has old Xid. Not processing");
+                                } else {
+                                    applyIncRequest(incRequest);
+                                    //consumeSnapshotOrdering();
+                                }
+                            } else {
+                                GetRequest getRequest = message.getGet();
+                                if (!isNewClientRequest(getRequest.getXid())) {
+                                    System.out.println("Client GetRequest has old Xid. Not processing");
+                                } else {
+                                    applyGetRequest(getRequest);
+                                }
+                            }
+                            if ((record.offset() + 1) % snapshotPeriod == 0) {
+                                System.out.println("Snapshot Period reached. Consuming ordering");
+                                onSnapshotTriggered();
+                            }
+                            shouldRespond(message, message.hasInc());
                         }
-                        shouldRespond(message, message.hasInc());
+                        consumerLock.unlock();
+                        System.out.println("Lock released");
                     }
                 }
+                System.exit(0);
             }
 
             private void onSnapshotTriggered() throws IOException {
@@ -484,30 +524,18 @@ public class Main {
                 }
                 System.out.println("Replica to take a snapshot is: " + nextReplica);
                 if (nextReplica.equals(replicaName)) {
-                    takeSnapshot();
+                    //var snapshot = takeSnapshot();
+                    Snapshot snapshot = takeSnapshot();
+                    byte[] snapshotInBytes = snapshot.toByteArray();
+                    try {
+                        publish(snapshotTopicName, snapshotInBytes);
+                    } catch (IOException e) {
+                        throw new RuntimeException(e);
+                    }
                     addSelfToSnapshotOrdering();
                 }
             }
 
-            private void takeSnapshot() {
-                TopicPartition partition = new TopicPartition(operationsTopicName, 0);
-                var operationsOffset = operationsConsumer.position(partition) - 1;
-                System.out.println("Snapshot taken at offsets....");
-                System.out.println("operationsOffset: " + operationsOffset);
-                partition = new TopicPartition(snapshotOrderingTopicName, 0);
-                var snapshotOrderingOffset = snapshotOrderingConsumer.position(partition) - 1;
-                System.out.println("snapshotOrdering offset: " + snapshotOrderingOffset);
-                Snapshot snapshot = Snapshot.newBuilder().setReplicaId(replicaName)
-                        .putAllTable(hashTable).setOperationsOffset(operationsOffset)
-                        .putAllClientCounters(clientRequestXidMap)
-                        .setSnapshotOrderingOffset(snapshotOrderingOffset).build();
-                byte[] snapshotInBytes = snapshot.toByteArray();
-                try {
-                    publish(snapshotTopicName, snapshotInBytes);
-                } catch (IOException e) {
-                    throw new RuntimeException(e);
-                }
-            }
 
             private String getNextReplicaInSnapshotOrdering() throws InvalidProtocolBufferException {
                 System.out.println("consuming from ordering...");
@@ -650,23 +678,49 @@ public class Main {
 
         static class KafkaTableDebugService extends KafkaTableDebugGrpc.KafkaTableDebugImplBase {
 
+            public KafkaTableDebugService(){
+                System.out.println("Kafka debugger started...");
+            }
+
             @Override
             public void debug(KafkaTableDebugRequest request,
                               StreamObserver<KafkaTableDebugResponse> responseObserver) {
+                System.out.println("Received debug request....");
+                try {
+                    if(consumerLock.tryLock(LOCK_WAIT, TimeUnit.SECONDS)) {
+                        Snapshot snapshot = takeSnapshot();
+                        responseObserver.onNext(KafkaTableDebugResponse.newBuilder().setSnapshot(snapshot)
+                                .build());
+                        responseObserver.onCompleted();
+                        consumerLock.unlock();
+                        System.out.println("Lock released");
+                    }
+                } catch (InterruptedException e) {
+                    throw new RuntimeException(e);
+                }
 
             }
 
             @Override
             public void exit(ExitRequest request,
                              StreamObserver<ExitResponse> responseObserver) {
-                operationsConsumer.unsubscribe();
-                snapshotConsumer.unsubscribe();
-                snapshotOrderingConsumer.unsubscribe();
-                isSnapshotOrderingTopicSubscribed = false;
-                isOperationsTopicSubscribed = false;
-                isSnapshotTopicSubscribed = false;
-                System.out.println("Exiting...");
-                server.shutdown();
+                try {
+                    if(consumerLock.tryLock(LOCK_WAIT, TimeUnit.SECONDS)) {
+                        operationsConsumer.unsubscribe();
+                        snapshotConsumer.unsubscribe();
+                        snapshotOrderingConsumer.unsubscribe();
+                        isSnapshotOrderingTopicSubscribed = false;
+                        isOperationsTopicSubscribed = false;
+                        isSnapshotTopicSubscribed = false;
+                        System.out.println("Exiting...");
+                        responseObserver.onNext(ExitResponse.newBuilder().build());
+                        responseObserver.onCompleted();
+                        consumerLock.unlock();
+                        server.shutdown();
+                    }
+                } catch (InterruptedException e) {
+                    throw new RuntimeException(e);
+                }
             }
 
 
@@ -674,7 +728,40 @@ public class Main {
 
     }
 
-    @Command(name = "client", mixinStandardHelpOptions = true, description = "start a KafkaTable Client.")
+    @Command(name = "test-debug-service", mixinStandardHelpOptions = true, description = "start a test client.")
+    static class TestDebugCli implements Callable<Integer> {
+
+        @Command
+        int debug(@Parameters(paramLabel = "grpcHost:port") String server) {
+            System.out.println("Sending debug request to: "+ server);
+            var stub = KafkaTableDebugGrpc.newBlockingStub(ManagedChannelBuilder.forTarget(server).usePlaintext().build());
+            var rsp = stub.debug(KafkaTableDebugRequest.newBuilder().build());
+            var debugSnapshot = rsp.getSnapshot();
+            System.out.println("Snapshot info: ");
+            System.out.println("replicaId: "+ debugSnapshot.getReplicaId());
+            System.out.println("operationsOffset: "+debugSnapshot.getOperationsOffset());
+            System.out.println("snapshotOrderingOffset: "+debugSnapshot.getSnapshotOrderingOffset());
+            System.out.println("client counter: "+ debugSnapshot.getClientCountersMap());
+            System.out.println("hashtable: "+debugSnapshot.getTableMap());
+            return 0;
+        }
+
+        @Command
+        int exit(@Parameters(paramLabel = "grpcHost:port") String server) {
+            System.out.println("Sending debug request to: "+ server);
+            var stub = KafkaTableDebugGrpc.newBlockingStub(ManagedChannelBuilder.forTarget(server).usePlaintext().build());
+            var rsp = stub.exit(ExitRequest.newBuilder().build());
+            //System.out.println(rsp.getValue());
+            return 0;
+        }
+
+        @Override
+        public Integer call() throws Exception {
+            return null;
+        }
+    }
+
+        @Command(name = "client", mixinStandardHelpOptions = true, description = "start a KafkaTable Client.")
     static class ClientCli implements Callable<Integer> {
 
         @Parameters(index = "0", description = "client id")
@@ -888,7 +975,7 @@ public class Main {
 
     }
 
-    @Command(subcommands = {ServerCli.class, ClientCli.class, TestCli.class})
+    @Command(subcommands = {ServerCli.class, ClientCli.class, TestCli.class, TestDebugCli.class})
     static class Cli {
     }
 
