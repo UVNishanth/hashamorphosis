@@ -5,6 +5,7 @@
 //TODO: 5. either lock producer or have diff producers for each topic
 //TODO: DONE 6. seek after dummy poll might cause not yet assigned exception. do a catch where it polls until it forms the partition
 // TODO: 7. check if already present in snapshotOrdering topic before adding replica name
+//TODO: 8. replace snapshot offset: currently it is set to current offset. set it to one before and while setting state, set offset+1
 
 // My IP: 172.27.24.15
 package edu.sjsu.cs249.kafkaTable;
@@ -113,6 +114,20 @@ public class Main {
 
         static String operationsTopicName, snapshotTopicName, snapshotOrderingTopicName;
 
+        static KafkaProducer<String, byte[]> producer;
+        static KafkaConsumer<String, byte[]> operationsConsumer,snapshotConsumer
+                ,snapshotOrderingConsumer;
+        //KafkaProducer<String, byte[]> snapshotProducer;
+
+        static long operationsStartOffset = 0;
+        static long snapshotStartOffset = 0;
+        static long snapshotOrderingStartOffset = 0;
+        static boolean isOperationsTopicSubscribed = true;
+        static boolean isSnapshotTopicSubscribed = true;
+        static boolean isSnapshotOrderingTopicSubscribed = true;
+
+
+
 
         @Override
         public Integer call() throws Exception {
@@ -133,17 +148,6 @@ public class Main {
 
         static class KafkaTableService extends KafkaTableGrpc.KafkaTableImplBase {
 
-            KafkaProducer<String, byte[]> producer;
-            KafkaConsumer<String, byte[]> operationsConsumer;
-            //KafkaProducer<String, byte[]> snapshotProducer;
-            KafkaConsumer<String, byte[]> snapshotConsumer;
-            //KafkaProducer<String, byte[]> snapshotOrderingProducer;
-            KafkaConsumer<String, byte[]> snapshotOrderingConsumer;
-
-            long operationsStartOffset = 0;
-            long snapshotStartOffset = 0;
-
-            long snapshotOrderingStartOffset = 0;
 
             void gotoOffset(KafkaConsumer<String, byte[]> consumer, TopicPartition topicPartition, long offset) {
                 try {
@@ -261,9 +265,11 @@ public class Main {
             }
 
             void setupState() throws InvalidProtocolBufferException {
+                System.out.println("Setting up replica State...");
                 var records = snapshotConsumer.poll(Duration.ofSeconds(1));
                 ConsumerRecord<String, byte[]> latestRecord = null;
                 for (var record : records) {
+                    System.out.println("Record topic: "+record.topic());
                     System.out.println(record.headers());
                     System.out.println(record.timestamp());
                     System.out.println(record.timestampType());
@@ -276,10 +282,12 @@ public class Main {
                 }
                 Snapshot snapshot = Snapshot.parseFrom(latestRecord.value());
                 System.out.println(snapshot);
+                operationsStartOffset = snapshot.getOperationsOffset() + 1;
                 gotoOffset(operationsConsumer, new TopicPartition(operationsTopicName, 0),
-                        snapshot.getOperationsOffset());
+                        operationsStartOffset);
+                snapshotOrderingStartOffset = snapshot.getSnapshotOrderingOffset() + 1;
                 gotoOffset(snapshotOrderingConsumer, new TopicPartition(snapshotOrderingTopicName, 0),
-                        snapshot.getSnapshotOrderingOffset());
+                        snapshotOrderingStartOffset);
                 clientRequestXidMap.putAll(snapshot.getClientCountersMap());
                 System.out.println("Client counter map is: "+clientRequestXidMap);
                 hashTable.putAll(snapshot.getTableMap());
@@ -289,7 +297,7 @@ public class Main {
             }
 
 
-            public KafkaTableService(){
+            public KafkaTableService() throws IOException {
                 operationsTopicName = groupId + "operations";
                 snapshotTopicName = groupId + "snapshot";
                 snapshotOrderingTopicName = groupId + "snapshotOrdering";
@@ -304,7 +312,7 @@ public class Main {
                 new Thread(() -> {
                     try {
                         consumeOperations();
-                    } catch (InvalidProtocolBufferException e) {
+                    } catch (IOException e) {
                         throw new RuntimeException(e);
                     }
                 }).start();
@@ -331,15 +339,60 @@ public class Main {
 
             }
 
-            private void addSelfToSnapshotOrdering() {
-                SnapshotOrdering orderingMsg = SnapshotOrdering.newBuilder().setReplicaId(replicaName).build();
-                try {
-                    publish(snapshotOrderingTopicName, orderingMsg.toByteArray());
-                } catch (IOException e) {
-                    throw new RuntimeException(e);
-                }
-                System.out.println("Added myself to snapshot ordering...");
+//            private void checkSnapshotOrderingToAddSelf() throws InvalidProtocolBufferException {
+//                SnapshotOrdering orderingMsg = SnapshotOrdering.newBuilder().setReplicaId(replicaName).build();
+//                var records = snapshotOrderingConsumer.poll(Duration.ofSeconds(1));
+//                Boolean present = false;
+//                for (var record : records) {
+//                    System.out.println("Record topic: "+record.topic());
+//                    System.out.println(record.headers());
+//                    System.out.println(record.timestamp());
+//                    System.out.println(record.timestampType());
+//                    System.out.println(record.offset());
+//                    SnapshotOrdering message = SnapshotOrdering.parseFrom(record.value());
+//                    var snapshotOrderingReplicaName = message.getReplicaId();
+//                    if(snapshotOrderingReplicaName.equals((replicaName))){
+//                        present = true;
+//                        break;
+//                    }
+//                }
+//                if(!present){
+//                    addSelfToSnapshotOrdering();
+//                }
+//                else{
+//                    System.out.println("I am already present in the snapshotOrdering topic");
+//                }
+//                gotoOffset(snapshotOrderingConsumer, new TopicPartition(snapshotOrderingTopicName, 0),
+//                        snapshotOrderingStartOffset);
+//
+//
+//            }
 
+            private void addSelfToSnapshotOrdering() throws IOException {
+                SnapshotOrdering orderingMsg = SnapshotOrdering.newBuilder().setReplicaId(replicaName).build();
+                long offsetBeforeCheck = snapshotOrderingConsumer.position(new TopicPartition(snapshotOrderingTopicName, 0));
+                boolean present = false;
+                var records = snapshotOrderingConsumer.poll(Duration.ofSeconds(1));
+                for (var record : records) {
+                    System.out.println("Record topic: "+record.topic());
+                    System.out.println(record.headers());
+                    System.out.println(record.timestamp());
+                    System.out.println(record.timestampType());
+                    System.out.println(record.offset());
+                    SnapshotOrdering message = SnapshotOrdering.parseFrom(record.value());
+                    var snapshotOrderingReplicaName = message.getReplicaId();
+                    if(snapshotOrderingReplicaName.equals((replicaName))){
+                        System.out.println("I am already present in the snapshotOrdering topic.");
+                        present = true;
+                        break;
+                    }
+                }
+                if(!present) {
+                    publish(snapshotOrderingTopicName, orderingMsg.toByteArray());
+                    System.out.println("Added myself to snapshot ordering...");
+                }
+                gotoOffset(snapshotOrderingConsumer, new TopicPartition(snapshotOrderingTopicName, 0),
+                        offsetBeforeCheck);
             }
 
             private void updateHashTable(String key, int incValue) {
@@ -385,10 +438,11 @@ public class Main {
                 producer.send(record);
             }
 
-            void consumeOperations() throws InvalidProtocolBufferException {
-                while (true) {
+            void consumeOperations() throws IOException {
+                while (isOperationsTopicSubscribed) {
                     var records = operationsConsumer.poll(Duration.ofSeconds(1));
                     for (var record : records) {
+                        System.out.println("Record topic: "+record.topic());
                         System.out.println(record.headers());
                         System.out.println(record.timestamp());
                         System.out.println(record.timestampType());
@@ -420,7 +474,7 @@ public class Main {
                 }
             }
 
-            private void onSnapshotTriggered() {
+            private void onSnapshotTriggered() throws IOException {
                 String nextReplica = "";
                 try {
                     //consumeSnapshotOrdering();
@@ -437,10 +491,11 @@ public class Main {
 
             private void takeSnapshot() {
                 TopicPartition partition = new TopicPartition(operationsTopicName, 0);
-                var operationsOffset = operationsConsumer.position(partition);
+                var operationsOffset = operationsConsumer.position(partition) - 1;
+                System.out.println("Snapshot taken at offsets....");
                 System.out.println("operationsOffset: " + operationsOffset);
                 partition = new TopicPartition(snapshotOrderingTopicName, 0);
-                var snapshotOrderingOffset = snapshotOrderingConsumer.position(partition);
+                var snapshotOrderingOffset = snapshotOrderingConsumer.position(partition) - 1;
                 System.out.println("snapshotOrdering offset: " + snapshotOrderingOffset);
                 Snapshot snapshot = Snapshot.newBuilder().setReplicaId(replicaName)
                         .putAllTable(hashTable).setOperationsOffset(operationsOffset)
@@ -464,6 +519,7 @@ public class Main {
                     System.out.println("polling done...");
                     long offset = 0;
                     for (var record : records) {
+                        System.out.println("Record topic: "+record.topic());
                         System.out.println(record.headers());
                         System.out.println(record.timestamp());
                         System.out.println(record.timestampType());
@@ -480,12 +536,13 @@ public class Main {
 
             void consumeSnapshotOrdering() throws InvalidProtocolBufferException {
                 System.out.println("consuming snapshot ordering...");
-                while (true) {
+                while (isSnapshotOrderingTopicSubscribed) {
                     //System.out.println("consuming from ordering...");
                     var records = snapshotOrderingConsumer.poll(Duration.ofSeconds(1));
                     //System.out.println("consuming from ordering...");
                     //SnapshotOrdering message = null;
                     for (var record : records) {
+                        System.out.println("Record topic: "+record.topic());
                         System.out.println(record.headers());
                         System.out.println(record.timestamp());
                         System.out.println(record.timestampType());
@@ -602,7 +659,14 @@ public class Main {
             @Override
             public void exit(ExitRequest request,
                              StreamObserver<ExitResponse> responseObserver) {
-
+                operationsConsumer.unsubscribe();
+                snapshotConsumer.unsubscribe();
+                snapshotOrderingConsumer.unsubscribe();
+                isSnapshotOrderingTopicSubscribed = false;
+                isOperationsTopicSubscribed = false;
+                isSnapshotTopicSubscribed = false;
+                System.out.println("Exiting...");
+                server.shutdown();
             }
 
 
@@ -737,6 +801,7 @@ public class Main {
                 var records = consumer.poll(Duration.ofSeconds(20));
                 System.out.println("Got: " + records.count());
                 for (var record : records) {
+                    System.out.println("Record topic: "+record.topic());
                     System.out.println(record.headers());
                     System.out.println(record.timestamp());
                     System.out.println(record.timestampType());
