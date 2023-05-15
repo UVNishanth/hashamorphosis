@@ -460,10 +460,10 @@ public class Main {
 //                    return;
 //                }
                 //updateHashTable(incRequest.getKey(), incRequest.getIncValue());
-                var key = getRequest.getKey();
-                if (!hashTable.containsKey(key)) {
-                    hashTable.put(key, 0);
-                }
+//                var key = getRequest.getKey();
+//                if (!hashTable.containsKey(key)) {
+//                    hashTable.put(key, 0);
+//                }
                 updateClientXid(clientXid);
             }
 
@@ -501,7 +501,7 @@ public class Main {
                                     applyGetRequest(getRequest);
                                 }
                             }
-                            if ((record.offset() + 1) % snapshotPeriod == 0) {
+                            if (record.offset() % snapshotPeriod == 0) {
                                 System.out.println("Snapshot Period reached. Consuming ordering");
                                 onSnapshotTriggered();
                             }
@@ -599,8 +599,12 @@ public class Main {
                     GetRequest getRequest = message.getGet();
                     var clientXid = getRequest.getXid();
                     if (getResponseObserverMap.containsKey(clientXid)) {
+                        Integer valueRequested = 0;
+                        String key = getRequest.getKey();
                         var responseObserver = getResponseObserverMap.get(clientXid);
-                        Integer valueRequested = hashTable.get(getRequest.getKey());
+                        if (hashTable.containsKey(key)) {
+                            valueRequested = hashTable.get(key);
+                        }
                         responseObserver.onNext(GetResponse.newBuilder().setValue(valueRequested).build());
                         responseObserver.onCompleted();
                     }
