@@ -658,7 +658,7 @@ public class Main {
                 ClientXid clientXid = request.getXid();
                 if (!isNewClientRequest(clientXid)) {
                     System.out.println("Client Request has old Xid. responding immediately...");
-                    Integer valueRequested = hashTable.get(request.getKey());
+                    Integer valueRequested = hashTable.getOrDefault(request.getKey(), 0);
                     responseObserver.onNext(GetResponse.newBuilder().setValue(valueRequested).build());
                     responseObserver.onCompleted();
                     return;
