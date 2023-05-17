@@ -1,13 +1,4 @@
-//TODO: DONE 1. work on snapshot ordering and creating snapshots when snapshot period is reached.
-//TODO: DONE 2. reading snapshots on coming up. remember to always read the last snapshot in the snapshot topic
-//TODO DONE: 3. add callback to subscribe so that consumer is set up with the topic
-//TODO DONE: 4. set replica kafka property session timeout ms config to "10000" and then locks or semaphores to release when onPartitionAssigned and acquire above poll while
-//TODO: 5. either lock producer or have diff producers for each topic
-//TODO: DONE 6. seek after dummy poll might cause not yet assigned exception. do a catch where it polls until it forms the partition
-// TODO: 7. check if already present in snapshotOrdering topic before adding replica name
-//TODO: 8. replace snapshot offset: currently it is set to current offset. set it to one before and while setting state, set offset+1
 
-// My IP: 172.27.24.15
 package project.distrbuted.kafkaTable;
 
 import com.google.protobuf.InvalidProtocolBufferException;
