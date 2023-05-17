@@ -8,7 +8,7 @@
 //TODO: 8. replace snapshot offset: currently it is set to current offset. set it to one before and while setting state, set offset+1
 
 // My IP: 172.27.24.15
-package edu.sjsu.cs249.kafkaTable;
+package project.distrbuted.kafkaTable;
 
 import com.google.protobuf.InvalidProtocolBufferException;
 import io.grpc.Context;
@@ -43,6 +43,7 @@ import java.util.concurrent.locks.ReentrantLock;
 import java.util.stream.Collectors;
 
 import io.grpc.*;
+import project.distributed.kafkaTable.*;
 
 import java.net.SocketAddress;
 

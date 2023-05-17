@@ -4,7 +4,7 @@
          xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
     <modelVersion>4.0.0</modelVersion>
 
-    <groupId>edu.sjsu.cs249</groupId>
+    <groupId>project.distributed</groupId>
     <artifactId>kafka-table</artifactId>
     <version>1.0-SNAPSHOT</version>
 
@@ -120,7 +120,7 @@
                         <configuration>
                             <classifier>spring-boot</classifier>
                             <mainClass>
-                                edu.sjsu.cs249.kafkaTable.Main
+                                project.distrbuted.kafkaTable.Main
                             </mainClass>
                         </configuration>
                     </execution>
